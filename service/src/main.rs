@@ -80,6 +80,9 @@ struct RawParams {
     bg_threshold: Option<f64>,
     seg_conf: Option<f64>,
     seg_max: Option<usize>,
+    refine: Option<String>,
+    refine_snap: Option<f64>,
+    refine_edge: Option<f64>,
     quantize: Option<String>,
     colors: Option<usize>,
     simplify: Option<f64>,
@@ -138,6 +141,9 @@ async fn convert(mut multipart: Multipart) -> Result<Response, AppError> {
             }
             "seg_conf" => p.seg_conf = value.parse().ok().filter(|v: &f64| v.is_finite()),
             "seg_max" => p.seg_max = value.parse().ok(),
+            "refine" => p.refine = Some(value.to_string()),
+            "refine_snap" => p.refine_snap = value.parse().ok().filter(|v: &f64| v.is_finite()),
+            "refine_edge" => p.refine_edge = value.parse().ok().filter(|v: &f64| v.is_finite()),
             "quantize" => p.quantize = Some(value.to_string()),
             "colors" => p.colors = value.parse().ok(),
             "simplify" => p.simplify = value.parse().ok().filter(|v: &f64| v.is_finite()),
@@ -177,6 +183,13 @@ async fn convert(mut multipart: Multipart) -> Result<Response, AppError> {
     let engine_segment = matches!(p.engine.as_deref(), Some("segment"));
     let seg_conf = p.seg_conf.unwrap_or(0.4).clamp(0.05, 0.95) as f32;
     let seg_max = p.seg_max.unwrap_or(48).clamp(1, 256);
+    // Edge-guided refinement is owned-engine only: it relies on junction pinning
+    // across the full label map to tile gap-free, which the per-object layered
+    // (segment) trace can't provide across object boundaries.
+    let refine_on =
+        matches!(p.refine.as_deref(), Some("on") | Some("true") | Some("1")) && engine_owned;
+    let refine_snap = p.refine_snap.unwrap_or(2.0).clamp(0.5, 4.0);
+    let refine_edge = p.refine_edge.unwrap_or(0.25).clamp(0.05, 0.9) as f32;
 
     // Fail fast on a missing model *before* taking a converter slot — otherwise
     // a misconfigured deploy burns the whole pool on a predictable error.
@@ -190,6 +203,12 @@ async fn convert(mut multipart: Multipart) -> Result<Response, AppError> {
         return Err(AppError::internal(format!(
             "segmentation model not found at {} — run scripts/fetch-models.sh",
             svgit_objseg::default_model_path().display()
+        )));
+    }
+    if refine_on && !svgit_edgenet::default_model_path().exists() {
+        return Err(AppError::internal(format!(
+            "edge model not found at {} — run scripts/fetch-models.sh",
+            svgit_edgenet::default_model_path().display()
         )));
     }
 
@@ -222,6 +241,32 @@ async fn convert(mut multipart: Multipart) -> Result<Response, AppError> {
             .map_err(|e| format!("could not decode image: {e}"))?
             .to_rgba8();
         let mut raw = rgba.into_raw();
+
+        // Edge-guided refinement: compute a CNN edge map from the *original*
+        // image (before bg-removal / quantization) so snapping targets the true
+        // image edges. Built into a Refiner the owned/segment tracers consult.
+        let edge: Option<Vec<f32>> = if refine_on {
+            Some(svgit_edgenet::edge_map(
+                &raw,
+                w as usize,
+                h as usize,
+                &svgit_edgenet::default_model_path(),
+            )?)
+        } else {
+            None
+        };
+        let refiner = edge.as_ref().map(|e| {
+            svgit_pipeline::Refiner::new(
+                e,
+                w as usize,
+                h as usize,
+                svgit_pipeline::RefineConfig {
+                    snap_radius: refine_snap,
+                    edge_threshold: refine_edge,
+                    corner_threshold: curve_corner,
+                },
+            )
+        });
 
         // ML preprocess: drop the background by writing a u2netp saliency matte
         // into the alpha channel. The owned tracer skips alpha==0 deterministically
@@ -287,6 +332,7 @@ async fn convert(mut multipart: Multipart) -> Result<Response, AppError> {
                     corner_threshold: curve_corner,
                     curve_error: curve_err,
                 },
+                refiner.as_ref(),
             ));
         }
 
@@ -315,6 +361,7 @@ async fn convert(mut multipart: Multipart) -> Result<Response, AppError> {
                     corner_threshold: curve_corner,
                     curve_error: curve_err,
                 },
+                refiner.as_ref(),
             ));
         }
 

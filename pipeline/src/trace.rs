@@ -6,13 +6,47 @@
 //! the tracer derives its palette from the distinct colors present, so feeding
 //! it a full-color photo would produce one region per unique color.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::contour::contours_of;
 use crate::curvefit;
+use crate::refine::Refiner;
 use crate::segment::{segment, Segmentation};
 use crate::simplify::simplify_closed;
-use crate::svg::{polygon_subpath, to_svg, to_svg_layered, Region};
+use crate::svg::{polygon_subpath, polygon_subpath_f, to_svg, to_svg_layered, Region};
+
+/// Lattice points where 3+ distinct regions (including "outside") meet. Pinning
+/// these in simplification keeps adjacent regions' shared boundaries aligned —
+/// without it, per-region RDP drops junctions inconsistently and leaves gaps.
+fn junction_set(labels: &[u32], w: usize, h: usize) -> HashSet<(i32, i32)> {
+    let mut set = HashSet::new();
+    let lab = |px: i64, py: i64| -> u32 {
+        if px < 0 || py < 0 || px >= w as i64 || py >= h as i64 {
+            u32::MAX // "outside" counts as its own region
+        } else {
+            labels[py as usize * w + px as usize]
+        }
+    };
+    for ly in 0..=h as i64 {
+        for lx in 0..=w as i64 {
+            let mut vals = [
+                lab(lx - 1, ly - 1),
+                lab(lx, ly - 1),
+                lab(lx - 1, ly),
+                lab(lx, ly),
+            ];
+            vals.sort_unstable();
+            let distinct = 1
+                + (vals[0] != vals[1]) as usize
+                + (vals[1] != vals[2]) as usize
+                + (vals[2] != vals[3]) as usize;
+            if distinct >= 3 {
+                set.insert((lx as i32, ly as i32));
+            }
+        }
+    }
+    set
+}
 
 #[derive(Debug, Clone)]
 pub struct TraceConfig {
@@ -77,8 +111,11 @@ fn regions_of(
     palette: &[[u8; 3]],
     cfg: &TraceConfig,
     skip: Option<usize>,
+    refine: Option<&Refiner>,
 ) -> Vec<Region> {
     let bboxes = seg.bboxes();
+    // Shared junctions, pinned in simplification so adjacent regions tile gaplessly.
+    let junctions = junction_set(&seg.labels, seg.width, seg.height);
     let mut regions: Vec<Region> = Vec::new();
     for c in 0..seg.num_components {
         if seg.component_color[c] == 0 || Some(c) == skip {
@@ -88,17 +125,31 @@ fn regions_of(
         let raw_loops = contours_of(&seg.labels, seg.width, seg.height, c as u32, bboxes[c]);
         let mut subpaths = Vec::with_capacity(raw_loops.len());
         for lp in raw_loops {
-            // Simplify, but never let RDP collapse a real loop to nothing —
-            // fall back to the exact contour so small holes/regions survive.
-            let simp = simplify_closed(&lp, cfg.simplify);
-            let poly = if simp.len() >= 3 { simp } else { lp };
-            if poly.len() < 3 {
-                continue;
-            }
-            let sub = if cfg.curve && poly.len() >= 4 {
-                curvefit::fit_loop(&poly, cfg.corner_threshold, cfg.curve_error)
+            let sub = if let Some(r) = refine {
+                // Edge-guided: snap the dense contour onto true edges, simplify,
+                // then curve-fit (or emit the snapped float polygon).
+                let (pts, corners) = r.refine_loop(&lp, cfg.simplify, &junctions);
+                if pts.len() < 3 {
+                    continue;
+                }
+                if cfg.curve && pts.len() >= 4 {
+                    curvefit::fit_loop_pts(&pts, &corners, cfg.curve_error)
+                } else {
+                    polygon_subpath_f(&pts)
+                }
             } else {
-                polygon_subpath(&poly)
+                // Simplify, but never let RDP collapse a real loop to nothing —
+                // fall back to the exact contour so small holes/regions survive.
+                let simp = simplify_closed(&lp, cfg.simplify);
+                let poly = if simp.len() >= 3 { simp } else { lp };
+                if poly.len() < 3 {
+                    continue;
+                }
+                if cfg.curve && poly.len() >= 4 {
+                    curvefit::fit_loop(&poly, cfg.corner_threshold, cfg.curve_error)
+                } else {
+                    polygon_subpath(&poly)
+                }
             };
             subpaths.push(sub);
         }
@@ -110,7 +161,14 @@ fn regions_of(
 }
 
 /// Trace an (already quantized) RGBA buffer into a flat-color SVG document.
-pub fn trace_rgba(pixels: &[u8], width: usize, height: usize, cfg: &TraceConfig) -> String {
+/// Pass a [`Refiner`] to snap contours onto a CNN edge map before fitting.
+pub fn trace_rgba(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    cfg: &TraceConfig,
+    refine: Option<&Refiner>,
+) -> String {
     let n = width * height;
     if n == 0 || pixels.len() < n * 4 {
         return to_svg(width, height, None, &[]);
@@ -135,7 +193,7 @@ pub fn trace_rgba(pixels: &[u8], width: usize, height: usize, cfg: &TraceConfig)
     }
     let background = bg_region.map(|c| palette[(seg.component_color[c] - 1) as usize]);
 
-    let regions = regions_of(&seg, &palette, cfg, bg_region);
+    let regions = regions_of(&seg, &palette, cfg, bg_region, refine);
     to_svg(width, height, background, &regions)
 }
 
@@ -153,6 +211,7 @@ pub fn trace_layered(
     instance_id: &[u32],
     num_instances: usize,
     cfg: &TraceConfig,
+    refine: Option<&Refiner>,
 ) -> String {
     let n = width * height;
     if n == 0 || pixels.len() < n * 4 || instance_id.len() < n {
@@ -179,7 +238,7 @@ pub fn trace_layered(
         }
         let mut seg = segment(&midx, width, height);
         seg.merge_small(cfg.min_area);
-        let regions = regions_of(&seg, &palette, cfg, None);
+        let regions = regions_of(&seg, &palette, cfg, None, refine);
         if regions.is_empty() {
             continue;
         }
@@ -211,7 +270,7 @@ mod tests {
             [0, 0, 255, 255],
             [0, 0, 255, 255],
         ]);
-        let svg = trace_rgba(&px, 2, 2, &TraceConfig { min_area: 0, simplify: 0.0, ..Default::default() });
+        let svg = trace_rgba(&px, 2, 2, &TraceConfig { min_area: 0, simplify: 0.0, ..Default::default() }, None);
         assert!(svg.starts_with("<?xml"));
         assert!(svg.contains("<svg"));
         assert!(svg.ends_with("</svg>\n"));
@@ -232,7 +291,7 @@ mod tests {
             [0, 0, 0, 0],
             [0, 0, 0, 0],
         ]);
-        let svg = trace_rgba(&px, 2, 2, &TraceConfig { background: false, min_area: 0, simplify: 0.0, ..Default::default() });
+        let svg = trace_rgba(&px, 2, 2, &TraceConfig { background: false, min_area: 0, simplify: 0.0, ..Default::default() }, None);
         assert_eq!(svg.matches("<path").count(), 1);
         assert!(svg.contains("#00ff00"));
         assert!(!svg.contains("<rect"));
@@ -246,7 +305,7 @@ mod tests {
         let r = [200, 0, 0, 255];
         let g = [0, 200, 0, 255];
         let px = rgba(&[r, r, g, r, g, r]);
-        let svg = trace_rgba(&px, 6, 1, &TraceConfig { min_area: 0, simplify: 0.0, ..Default::default() });
+        let svg = trace_rgba(&px, 6, 1, &TraceConfig { min_area: 0, simplify: 0.0, ..Default::default() }, None);
         assert!(svg.contains("<rect")); // red background
         assert_eq!(svg.matches("<path").count(), 1, "the two greens merge to one path");
         assert_eq!(svg.matches('M').count(), 2, "one path, two subpaths");
@@ -255,7 +314,7 @@ mod tests {
 
     #[test]
     fn empty_image_is_valid_svg() {
-        let svg = trace_rgba(&[], 0, 0, &TraceConfig::default());
+        let svg = trace_rgba(&[], 0, 0, &TraceConfig::default(), None);
         assert!(svg.contains("<svg"));
         assert!(svg.contains("</svg>"));
     }
@@ -270,7 +329,7 @@ mod tests {
         let px = rgba(&[r, r, b, g]);
         let inst = vec![0u32, 0, 1, 2];
         let cfg = TraceConfig { min_area: 0, simplify: 0.0, ..Default::default() };
-        let svg = trace_layered(&px, 4, 1, &inst, 2, &cfg);
+        let svg = trace_layered(&px, 4, 1, &inst, 2, &cfg, None);
 
         assert!(svg.starts_with("<?xml"));
         assert!(svg.ends_with("</svg>\n"));
@@ -288,7 +347,7 @@ mod tests {
 
     #[test]
     fn layered_empty_is_valid_svg() {
-        let svg = trace_layered(&[], 0, 0, &[], 0, &TraceConfig::default());
+        let svg = trace_layered(&[], 0, 0, &[], 0, &TraceConfig::default(), None);
         assert!(svg.contains("<svg"));
         assert!(svg.contains("</svg>"));
     }

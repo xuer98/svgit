@@ -13,10 +13,12 @@ pub mod color;
 pub mod contour;
 pub mod curvefit;
 pub mod quantize;
+pub mod refine;
 pub mod segment;
 pub mod simplify;
 pub mod svg;
 pub mod trace;
 
 pub use quantize::{quantize_rgba, QuantizeConfig};
+pub use refine::{RefineConfig, Refiner};
 pub use trace::{trace_layered, trace_rgba, TraceConfig};

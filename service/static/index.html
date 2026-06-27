@@ -321,6 +321,21 @@
         <label>Corner threshold <span class="val" id="curve_corner-v"></span>°</label>
         <input type="range" id="curve_corner" min="0" max="180" step="5" value="80">
       </div>
+      <div class="field owned-only">
+        <label>Refine edges <span class="hint">CNN snap</span></label>
+        <div class="seg" id="refine" data-default="off">
+          <button data-v="off" class="active">Off</button>
+          <button data-v="on">On</button>
+        </div>
+      </div>
+      <div class="field refine-only">
+        <label>Snap radius <span class="val" id="refine_snap-v"></span><span class="hint">px</span></label>
+        <input type="range" id="refine_snap" min="0.5" max="4" step="0.5" value="2">
+      </div>
+      <div class="field refine-only">
+        <label>Edge gate <span class="val" id="refine_edge-v"></span></label>
+        <input type="range" id="refine_edge" min="0.05" max="0.8" step="0.05" value="0.3">
+      </div>
     </div>
 
     <div class="group vtracer-only">
@@ -422,10 +437,10 @@ let debounceTimer = null;
 let inflight = null;      // AbortController for the active request
 
 // ---- sliders with live value labels ----
-const sliders = ['bg_threshold','seg_conf','seg_max','colors','simplify','min_region','curve_error','curve_corner','filter_speckle','color_precision','layer_difference',
+const sliders = ['bg_threshold','seg_conf','seg_max','colors','simplify','min_region','curve_error','curve_corner','refine_snap','refine_edge','filter_speckle','color_precision','layer_difference',
                  'corner_threshold','length_threshold','splice_threshold','max_iterations','path_precision'];
 // Sliders that belong to the owned pipeline / preprocess / segmentation, not a vtracer preset.
-const NON_PRESET_SLIDERS = new Set(['bg_threshold','seg_conf','seg_max','colors','simplify','min_region','curve_error','curve_corner']);
+const NON_PRESET_SLIDERS = new Set(['bg_threshold','seg_conf','seg_max','colors','simplify','min_region','curve_error','curve_corner','refine_snap','refine_edge']);
 for (const id of sliders) {
   const el = $(id), label = $(id + '-v');
   const sync = () => { label.textContent = el.value; };
@@ -442,11 +457,11 @@ function setSeg(id, v) {
   $(id).querySelectorAll('button').forEach(b =>
     b.classList.toggle('active', b.dataset.v === v));
 }
-for (const id of ['engine','bg_remove','quantize','curve','color_mode','hierarchical','mode']) {
+for (const id of ['engine','bg_remove','quantize','curve','refine','color_mode','hierarchical','mode']) {
   $(id).querySelectorAll('button').forEach(btn => {
     btn.addEventListener('click', () => {
       setSeg(id, btn.dataset.v);
-      if (!['quantize','engine','curve','bg_remove'].includes(id)) markCustom();
+      if (!['quantize','engine','curve','bg_remove','refine'].includes(id)) markCustom();
       reflectConditional();
       convertNow();
     });
@@ -462,6 +477,8 @@ function reflectConditional() {
   const isSpline = segValue('mode') === 'spline';
   const isQuant = segValue('quantize') === 'on';
   const curveOn = pipeline && segValue('curve') === 'on';
+  const refineOn = owned && segValue('refine') === 'on';
+  document.querySelectorAll('.refine-only').forEach(e => e.classList.toggle('hide', !refineOn));
   const bgOn = owned && segValue('bg_remove') === 'on';
   // The cutoff slider only matters when background removal is active (owned only).
   document.querySelectorAll('.bgremove-only').forEach(e => e.classList.toggle('hide', !bgOn));
@@ -506,6 +523,7 @@ function gatherParams() {
     bg_remove: ownedEngine ? segValue('bg_remove') : 'off',
     quantize: segValue('quantize'),
     curve: segValue('curve'),
+    refine: ownedEngine ? segValue('refine') : 'off',
     color_mode: segValue('color_mode'),
     hierarchical: segValue('hierarchical'),
     mode: segValue('mode'),

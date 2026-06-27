@@ -66,19 +66,20 @@ pub fn fit_loop(loop_pts: &[(i32, i32)], corner_deg: f64, error: f64) -> Subpath
     if pts.len() > 1 && pts.first() == pts.last() {
         pts.pop();
     }
-    let n = pts.len();
-    if n < 4 {
-        // Degenerate: emit a polygon.
-        return Subpath {
-            start: pts.first().copied().unwrap_or((0.0, 0.0)),
-            segs: pts[1..].iter().map(|&p| Seg::Line(p)).collect(),
-        };
-    }
+    let corners = detect_corners(&pts, corner_deg);
+    fit_loop_pts(&pts, &corners, error)
+}
 
-    // Corner detection: a vertex is a corner if the turn between its incoming
-    // and outgoing edges exceeds the threshold.
+/// Indices of `pts` where the turn between the incoming and outgoing edge
+/// exceeds `corner_deg` degrees. Direction-symmetric, so a boundary traced from
+/// either side yields the same corners (keeps shared region edges consistent).
+pub fn detect_corners(pts: &[V], corner_deg: f64) -> Vec<usize> {
+    let n = pts.len();
+    if n < 3 {
+        return Vec::new();
+    }
     let cos_thresh = corner_deg.to_radians().cos();
-    let mut corners: Vec<usize> = Vec::new();
+    let mut corners = Vec::new();
     for i in 0..n {
         let prev = pts[(i + n - 1) % n];
         let cur = pts[i];
@@ -89,13 +90,29 @@ pub fn fit_loop(loop_pts: &[(i32, i32)], corner_deg: f64, error: f64) -> Subpath
             corners.push(i);
         }
     }
+    corners
+}
+
+/// Fit a closed loop given as float points plus precomputed corner indices
+/// (ascending, `< pts.len()`). The curve is cut into open spans at the corners
+/// — each fit independently — so genuine corners stay crisp. Used by both the
+/// integer [`fit_loop`] and the edge-refined tracer.
+pub fn fit_loop_pts(pts: &[V], corners: &[usize], error: f64) -> Subpath {
+    let n = pts.len();
+    if n < 4 {
+        // Degenerate: emit a polygon.
+        return Subpath {
+            start: pts.first().copied().unwrap_or((0.0, 0.0)),
+            segs: pts.get(1..).unwrap_or(&[]).iter().map(|&p| Seg::Line(p)).collect(),
+        };
+    }
 
     let mut cubics: Vec<[V; 3]> = Vec::new();
     let start;
     if corners.is_empty() {
         // Smooth closed loop: break at vertex 0 and fit it as one open span.
         start = pts[0];
-        let mut span: Vec<V> = pts.clone();
+        let mut span: Vec<V> = pts.to_vec();
         span.push(pts[0]);
         fit_span(&span, error, &mut cubics);
     } else {

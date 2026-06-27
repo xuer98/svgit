@@ -1,0 +1,14 @@
+[package]
+name = "svgit-edgenet"
+version = "0.1.0"
+edition = "2021"
+description = "CNN edge detection (DexiNed) for svgit contour refinement (Level 3 ML layer)."
+license = "MIT"
+
+[lib]
+name = "svgit_edgenet"
+
+[dependencies]
+# Shares the onnxruntime download with the other ML crates; kept out of svgit-pipeline.
+ort = { version = "=2.0.0-rc.10", features = ["download-binaries"] }
+image = "0.23.10"

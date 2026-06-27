@@ -41,4 +41,10 @@ fetch "FastSAM-x.onnx" \
   "https://huggingface.co/badongtakla/fastsam-onnx/resolve/main/FastSAM-x.onnx" \
   "2fd54062159a4f014aea904ebefea55ce049bcf4d991ac070b3fe6da323010ca"
 
+# Informative-Drawings line-art net (~17 MB) — CNN edge map for the owned/segment
+# "Refine edges" option (contour snapping).
+fetch "lineart.onnx" \
+  "https://huggingface.co/rocca/informative-drawings-line-art-onnx/resolve/main/model.onnx" \
+  "1fef40b8f7126d827e30fbebccf95ae9b0b391795df926bf9366a821bad4f498"
+
 echo "All models ready in $DEST/"

@@ -7,5 +7,6 @@ members = [
     "pipeline",
     "bgremove",
     "objseg",
+    "edgenet",
 ]
 resolver = "2"

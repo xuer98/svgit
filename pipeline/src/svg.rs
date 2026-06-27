@@ -41,6 +41,13 @@ pub fn polygon_subpath(pts: &[Pt]) -> Subpath {
     Subpath { start, segs }
 }
 
+/// Build a closed polygon subpath from float corners (e.g. edge-snapped points).
+pub fn polygon_subpath_f(pts: &[Ptf]) -> Subpath {
+    let start = pts.first().copied().unwrap_or((0.0, 0.0));
+    let segs = pts.get(1..).unwrap_or(&[]).iter().map(|&p| Seg::Line(p)).collect();
+    Subpath { start, segs }
+}
+
 fn hex(c: [u8; 3]) -> String {
     format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
 }
