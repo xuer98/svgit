@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 vtracer = { path = "../cmdapp" }
 svgit-pipeline = { path = "../pipeline" }
+svgit-bgremove = { path = "../bgremove" }
 axum = { version = "0.7", features = ["multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
 image = "0.23.10"

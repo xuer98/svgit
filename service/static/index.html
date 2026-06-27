@@ -245,6 +245,21 @@
       </div>
     </div>
 
+    <div class="group owned-only">
+      <h3>Preprocess</h3>
+      <div class="field">
+        <label>Remove background <span class="hint">u2netp ML</span></label>
+        <div class="seg" id="bg_remove" data-default="off">
+          <button data-v="off" class="active">Off</button>
+          <button data-v="on">On</button>
+        </div>
+      </div>
+      <div class="field bgremove-only">
+        <label>Cutoff <span class="val" id="bg_threshold-v"></span><span class="hint">tighter →</span></label>
+        <input type="range" id="bg_threshold" min="0" max="0.95" step="0.05" value="0.5">
+      </div>
+    </div>
+
     <div class="group vtracer-only">
       <h3>Preset</h3>
       <div class="field">
@@ -394,10 +409,10 @@ let debounceTimer = null;
 let inflight = null;      // AbortController for the active request
 
 // ---- sliders with live value labels ----
-const sliders = ['colors','simplify','min_region','curve_error','curve_corner','filter_speckle','color_precision','layer_difference',
+const sliders = ['bg_threshold','colors','simplify','min_region','curve_error','curve_corner','filter_speckle','color_precision','layer_difference',
                  'corner_threshold','length_threshold','splice_threshold','max_iterations','path_precision'];
-// Sliders that belong to the owned pipeline, not a vtracer preset.
-const NON_PRESET_SLIDERS = new Set(['colors','simplify','min_region','curve_error','curve_corner']);
+// Sliders that belong to the owned pipeline / preprocess, not a vtracer preset.
+const NON_PRESET_SLIDERS = new Set(['bg_threshold','colors','simplify','min_region','curve_error','curve_corner']);
 for (const id of sliders) {
   const el = $(id), label = $(id + '-v');
   const sync = () => { label.textContent = el.value; };
@@ -414,11 +429,11 @@ function setSeg(id, v) {
   $(id).querySelectorAll('button').forEach(b =>
     b.classList.toggle('active', b.dataset.v === v));
 }
-for (const id of ['engine','quantize','curve','color_mode','hierarchical','mode']) {
+for (const id of ['engine','bg_remove','quantize','curve','color_mode','hierarchical','mode']) {
   $(id).querySelectorAll('button').forEach(btn => {
     btn.addEventListener('click', () => {
       setSeg(id, btn.dataset.v);
-      if (id !== 'quantize' && id !== 'engine' && id !== 'curve') markCustom();
+      if (!['quantize','engine','curve','bg_remove'].includes(id)) markCustom();
       reflectConditional();
       convertNow();
     });
@@ -431,6 +446,9 @@ function reflectConditional() {
   const isSpline = segValue('mode') === 'spline';
   const isQuant = segValue('quantize') === 'on';
   const curveOn = owned && segValue('curve') === 'on';
+  const bgOn = owned && segValue('bg_remove') === 'on';
+  // The cutoff slider only matters when background removal is active (owned only).
+  document.querySelectorAll('.bgremove-only').forEach(e => e.classList.toggle('hide', !bgOn));
   // VTracer-specific groups are irrelevant under the owned engine.
   document.querySelectorAll('.vtracer-only').forEach(e => e.classList.toggle('hide', owned));
   document.querySelectorAll('.owned-only').forEach(e => e.classList.toggle('hide', !owned));
@@ -460,8 +478,12 @@ $('preset').addEventListener('change', (e) => {
 });
 
 function gatherParams() {
+  // Background removal is owned-engine only (deterministic transparent cutout);
+  // never leak a stale 'on' to VTracer, whose keying is heuristic.
+  const ownedEngine = segValue('engine') === 'owned';
   const p = {
     engine: segValue('engine'),
+    bg_remove: ownedEngine ? segValue('bg_remove') : 'off',
     quantize: segValue('quantize'),
     curve: segValue('curve'),
     color_mode: segValue('color_mode'),

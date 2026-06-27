@@ -4,3 +4,13 @@ Cargo.lock
 .vscode
 .claude-flow
 .claude
+
+# ONNX model weights — fetched via scripts/fetch-models.sh, not committed.
+models/
+
+# Stray debug binaries that landed in the repo root.
+/boundary_edges
+/collinear_edge
+/integration_test
+/test_merge
+/test_palette

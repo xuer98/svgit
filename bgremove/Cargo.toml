@@ -1,0 +1,18 @@
+[package]
+name = "svgit-bgremove"
+version = "0.1.0"
+edition = "2021"
+description = "ONNX (u2netp) background-removal preprocessor for svgit (Level 3 ML layer)."
+license = "MIT"
+
+[lib]
+name = "svgit_bgremove"
+
+[dependencies]
+# ONNX Runtime bindings. `download-binaries` fetches a prebuilt onnxruntime at
+# build time so we don't depend on a system install.
+ort = { version = "=2.0.0-rc.10", features = ["download-binaries"] }
+# Used only for high-quality resampling (model wants 320x320; matte comes back
+# at 320x320 and must scale to the source size). Pinned to the service's version
+# so the workspace resolves a single `image`.
+image = "0.23.10"

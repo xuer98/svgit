@@ -76,6 +76,8 @@ async fn index() -> Html<&'static str> {
 struct RawParams {
     preset: Option<String>,
     engine: Option<String>,
+    bg_remove: Option<String>,
+    bg_threshold: Option<f64>,
     quantize: Option<String>,
     colors: Option<usize>,
     simplify: Option<f64>,
@@ -128,6 +130,10 @@ async fn convert(mut multipart: Multipart) -> Result<Response, AppError> {
         match name.as_str() {
             "preset" => p.preset = Some(value.to_string()),
             "engine" => p.engine = Some(value.to_string()),
+            "bg_remove" => p.bg_remove = Some(value.to_string()),
+            "bg_threshold" => {
+                p.bg_threshold = value.parse().ok().filter(|v: &f64| v.is_finite())
+            }
             "quantize" => p.quantize = Some(value.to_string()),
             "colors" => p.colors = value.parse().ok(),
             "simplify" => p.simplify = value.parse().ok().filter(|v: &f64| v.is_finite()),
@@ -162,6 +168,20 @@ async fn convert(mut multipart: Multipart) -> Result<Response, AppError> {
     let curve_on = matches!(p.curve.as_deref(), Some("on") | Some("true") | Some("1"));
     let curve_corner = p.curve_corner.unwrap_or(80.0).clamp(0.0, 180.0);
     let curve_err = p.curve_error.unwrap_or(2.0).clamp(0.1, 20.0);
+    let bg_remove = matches!(p.bg_remove.as_deref(), Some("on") | Some("true") | Some("1"));
+    let bg_threshold = p.bg_threshold.unwrap_or(0.5).clamp(0.0, 1.0) as f32;
+
+    // Fail fast on a missing model *before* taking a converter slot — otherwise
+    // a misconfigured deploy burns the whole pool on a predictable error.
+    if bg_remove {
+        let model = svgit_bgremove::default_model_path();
+        if !model.exists() {
+            return Err(AppError::internal(format!(
+                "background-removal model not found at {} — run scripts/fetch-models.sh",
+                model.display()
+            )));
+        }
+    }
 
     // Limit concurrent CPU-bound conversions. Held until the response is built.
     let _permit = convert_slots()
@@ -193,6 +213,22 @@ async fn convert(mut multipart: Multipart) -> Result<Response, AppError> {
             .to_rgba8();
         let mut raw = rgba.into_raw();
 
+        // ML preprocess: drop the background by writing a u2netp saliency matte
+        // into the alpha channel. The owned tracer skips alpha==0 deterministically
+        // (the UI restricts the toggle to it); VTracer only keys transparency out
+        // when its scanline heuristic fires, so via the API it is best-effort.
+        if bg_remove {
+            raw = svgit_bgremove::remove_background(
+                &raw,
+                w as usize,
+                h as usize,
+                &svgit_bgremove::default_model_path(),
+                &svgit_bgremove::BgConfig {
+                    threshold: bg_threshold,
+                },
+            )?;
+        }
+
         // Owned engine: quantize to N colors then run the fully-owned flat
         // tracer (segmentation → contours → simplify → SVG). No VTracer.
         if engine_owned {
@@ -211,7 +247,9 @@ async fn convert(mut multipart: Multipart) -> Result<Response, AppError> {
                     alpha_threshold: 0,
                     min_area: min_region,
                     simplify: simplify_eps,
-                    background: true,
+                    // With the background removed we want a transparent cutout,
+                    // so don't paint the dominant region as a full-canvas rect.
+                    background: !bg_remove,
                     curve: curve_on,
                     corner_threshold: curve_corner,
                     curve_error: curve_err,
