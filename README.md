@@ -3,102 +3,123 @@
   <h1>SvgIt</h1>
 
   <p>
-    <strong>Raster to Vector Graphics Converter</strong>
+    <strong>Raster → vector graphics, vectorizer.ai-style</strong>
   </p>
-
-  <h3>
-    <a href="https://www.visioncortex.org/vtracer-docs">Article</a>
-    <span> | </span>
-    <a href="https://www.visioncortex.org/vtracer/">Web App</a>
-    <span> | </span>
-    <a href="https://github.com/visioncortex/vtracer/releases">Download</a>
-  </h3>
 
 </div>
 
 ## Introduction
 
-This is an open source software to convert raster images (like jpg & png) into vector graphics (svg). It can vectorize graphics and photographs and trace the curves to output compact vector files.
+**SvgIt** turns raster images (PNG, JPG, …) into clean, compact SVG. It started as a
+fork of [visioncortex/vtracer](https://github.com/visioncortex/vtracer) and grew a
+fully-owned tracing pipeline plus an optional ML layer (background removal,
+object segmentation, edge refinement), all wrapped in a small HTTP service with a
+live-preview UI.
 
-Comparing to [Potrace](http://potrace.sourceforge.net/) which only accept binarized inputs (Black & White pixmap), VTracer has an image processing pipeline which can handle colored high resolution scans. tl;dr: Potrace uses a `O(n^2)` fitting algorithm, whereas `vtracer` is entirely `O(n)`.
+The project is built in three levels:
 
-Comparing to Adobe Illustrator's [Image Trace](https://helpx.adobe.com/illustrator/using/image-trace.html), VTracer's output is much more compact (less shapes) as we adopt a stacking strategy and avoid producing shapes with holes.
+- **Level 1** — a thin [axum](https://github.com/tokio-rs/axum) service wrapping the
+  VTracer core, with a parameter UI for live tuning.
+- **Level 2** — a dependency-free, fully-owned classical pipeline: LAB color
+  quantization → region segmentation → contour tracing → RDP simplify → Schneider
+  curve-fit → layering → minified SVG. Selectable as the **Owned** engine; produces
+  exactly-N-color output.
+- **Level 3** — an ML layer (PyTorch → ONNX, run embedded in Rust via
+  [`ort`](https://github.com/pykeio/ort)): salient-object background removal,
+  FastSAM "segment everything", and CNN edge/corner refinement.
 
-VTracer is originally designed for processing high resolution scans of historic blueprints up to gigapixels. At the same time, VTracer can also handle low resolution pixel art, simulating `image-rendering: pixelated` for retro game artworks.
-
-Technical descriptions of the [tracing algorithm](https://www.visioncortex.org/vtracer-docs) and [clustering algorithm](https://www.visioncortex.org/impression-docs).
-
-## Web App
-
-VTracer and its [core library](//github.com/visioncortex/visioncortex) is implemented in [Rust](//www.rust-lang.org/). It provides us a solid foundation to develop robust and efficient algorithms and easily bring it to interactive applications. The webapp is a perfect showcase of the capability of the Rust + wasm platform.
-
-![screenshot](docs/images/screenshot-01.png)
-
-![screenshot](docs/images/screenshot-02.png)
-
-## Cmd App
+## Quick start (the service)
 
 ```sh
-visioncortex VTracer 0.6.0
-A cmd app to convert images into vector graphics.
+cargo run -p svgit-service
+```
 
-USAGE:
-    vtracer [OPTIONS] --input <input> --output <output>
+Then open **http://127.0.0.1:8080** and drag, paste, or upload an image — it
+converts live as you adjust parameters.
 
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
+```sh
+PORT=8090 cargo run -p svgit-service   # bind a different port
+```
 
+> The first build downloads a prebuilt onnxruntime (via `ort`) and needs network
+> access. Subsequent builds are fast. Add `--release` for much faster ML inference.
+
+The **VTracer** and **Owned** engines work with no extra setup. The ML features
+need model weights — see below.
+
+### Engines
+
+| Engine | What it does |
+|--------|--------------|
+| **VTracer** | The upstream vtracer core — stacked color clustering + curve tracing. |
+| **Owned** | The dependency-free Level-2 pipeline; exact N-color flat output. Supports background removal and edge refinement. |
+| **Segment** | FastSAM "segment everything" → layered SVG, one `<g>` per detected object. |
+
+## ML layer & models
+
+The weights are large and license-encumbered, so they're git-ignored and fetched
+on demand:
+
+```sh
+./scripts/fetch-models.sh             # all models, into ./models
+SVGIT_MODEL_DIR=/path ./scripts/fetch-models.sh
+```
+
+| Model | Size | Powers |
+|-------|------|--------|
+| `u2netp.onnx` | ~4.6 MB | Remove background · **Fast** |
+| `isnet-general-use.onnx` | ~178 MB | Remove background · **High** (sharper fine detail) |
+| `lineart.onnx` | ~17 MB | **Refine edges** (owned engine contour snapping) |
+| `FastSAM-x.onnx` | ~289 MB | **Segment** engine |
+
+Until a model is present, its feature returns a clear "model not found" error; every
+other feature still works. The core tracer needs no models at all.
+
+## Command-line app (vtracer)
+
+The original VTracer CLI is still in the workspace:
+
+```sh
+cargo run -p vtracer -- --input input.jpg --output output.svg
+```
+
+It's also published independently on [crates.io/vtracer](https://crates.io/crates/vtracer)
+(`cargo install vtracer`) and as a [Python package](https://pypi.org/project/vtracer/)
+(`pip install vtracer`).
+
+```
 OPTIONS:
         --colormode <color_mode>                 True color image `color` (default) or Binary image `bw`
     -p, --color_precision <color_precision>      Number of significant bits to use in an RGB channel
     -c, --corner_threshold <corner_threshold>    Minimum momentary angle (degree) to be considered a corner
     -f, --filter_speckle <filter_speckle>        Discard patches smaller than X px in size
     -g, --gradient_step <gradient_step>          Color difference between gradient layers
-        --hierarchical <hierarchical>
-            Hierarchical clustering `stacked` (default) or non-stacked `cutout`. Only applies to color mode.
-
+        --hierarchical <hierarchical>            `stacked` (default) or `cutout` (color mode only)
     -i, --input <input>                          Path to input raster image
-    -m, --mode <mode>                            Curver fitting mode `pixel`, `polygon`, `spline`
+    -m, --mode <mode>                            Curve fitting mode `pixel`, `polygon`, `spline`
     -o, --output <output>                        Path to output vector graphics
         --path_precision <path_precision>        Number of decimal places to use in path string
         --preset <preset>                        Use one of the preset configs `bw`, `poster`, `photo`
-    -l, --segment_length <segment_length>
-            Perform iterative subdivide smooth until all segments are shorter than this length
-
+    -l, --segment_length <segment_length>        Subdivide-smooth until all segments are shorter than this
     -s, --splice_threshold <splice_threshold>    Minimum angle displacement (degree) to splice a spline
 ```
 
-## Downloads
+## Workspace layout
 
-You can download pre-built binaries from [Releases](https://github.com/visioncortex/vtracer/releases).
+| Crate | Role |
+|-------|------|
+| `cmdapp` (`vtracer`) | Upstream VTracer CLI. |
+| `webapp` | VTracer WASM build for the browser. |
+| `service` (`svgit-service`) | The axum HTTP service + live-preview UI. |
+| `pipeline` (`svgit-pipeline`) | Owned, dependency-free classical tracer. |
+| `bgremove` (`svgit-bgremove`) | ONNX background removal (u2netp / ISNet). |
+| `objseg` (`svgit-objseg`) | FastSAM object segmentation. |
+| `edgenet` (`svgit-edgenet`) | Line-art CNN edge map for contour refinement. |
 
-You can also install the program from source from [crates.io/vtracer](https://crates.io/crates/vtracer):
+## Credits
 
-```sh
-cargo install vtracer
-```
-
-> You are strongly advised to not download from any other third-party sources 
-
-### Usage
-
-```sh
-./vtracer --input input.jpg --output output.svg
-```
-
-### Rust Library
-
-You can install [`vtracer`](https://crates.io/crates/vtracer) as a Rust library.
-
-```sh
-cargo add vtracer
-```
-
-### Python Library
-
-Since `0.6`, [`vtracer`](https://pypi.org/project/vtracer/) is also packaged as Python native extensions, thanks to the awesome [pyo3](https://github.com/PyO3/pyo3) project.
-
-```sh
-pip install vtracer
-```
+SvgIt is built on [VTracer](https://github.com/visioncortex/vtracer) by
+[VisionCortex](https://www.visioncortex.org/). See the
+[tracing](https://www.visioncortex.org/vtracer-docs) and
+[clustering](https://www.visioncortex.org/impression-docs) algorithm write-ups for
+the foundations it builds on.
