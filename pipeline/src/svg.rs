@@ -6,6 +6,7 @@
 //! optional background `<rect>` lets the caller drop the single largest region,
 //! which the others then stack on top of — keeping the path count low.
 
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
 type Pt = (i32, i32);
@@ -102,12 +103,23 @@ pub fn to_svg(width: usize, height: usize, background: Option<[u8; 3]>, regions:
             hex(bg)
         );
     }
-    let mut d = String::new();
+    // Minify: merge every subpath of the same fill color into a single
+    // `<path>`. The owned tracer's regions tile the canvas (no overlap), so
+    // z-order is irrelevant and this is lossless. A region whose color matches
+    // the background rect is fully covered by it and is dropped entirely. The
+    // result has at most one path per color. BTreeMap keeps the output ordered
+    // (deterministic) by color.
+    let mut by_color: BTreeMap<[u8; 3], String> = BTreeMap::new();
     for r in regions {
-        d.clear();
-        for sp in &r.subpaths {
-            write_subpath(&mut d, sp);
+        if Some(r.color) == background {
+            continue; // already painted by the background rect
         }
+        let d = by_color.entry(r.color).or_default();
+        for sp in &r.subpaths {
+            write_subpath(d, sp);
+        }
+    }
+    for (color, d) in &by_color {
         if d.is_empty() {
             continue;
         }
@@ -115,7 +127,7 @@ pub fn to_svg(width: usize, height: usize, background: Option<[u8; 3]>, regions:
             s,
             "<path d=\"{}\" fill=\"{}\" fill-rule=\"nonzero\"/>",
             d,
-            hex(r.color)
+            hex(*color)
         );
     }
     s.push_str("</svg>\n");

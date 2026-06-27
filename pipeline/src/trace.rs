@@ -167,10 +167,24 @@ mod tests {
     }
 
     #[test]
+    fn same_color_regions_merge_into_one_path() {
+        // 6x1: red red green red green red. The two disconnected green cells
+        // share a color and must merge into ONE <path> (two subpaths); red is
+        // the background rect, so the red cells are dropped entirely.
+        let r = [200, 0, 0, 255];
+        let g = [0, 200, 0, 255];
+        let px = rgba(&[r, r, g, r, g, r]);
+        let svg = trace_rgba(&px, 6, 1, &TraceConfig { min_area: 0, simplify: 0.0, ..Default::default() });
+        assert!(svg.contains("<rect")); // red background
+        assert_eq!(svg.matches("<path").count(), 1, "the two greens merge to one path");
+        assert_eq!(svg.matches('M').count(), 2, "one path, two subpaths");
+        assert!(svg.contains("#00c800")); // green
+    }
+
+    #[test]
     fn empty_image_is_valid_svg() {
         let svg = trace_rgba(&[], 0, 0, &TraceConfig::default());
         assert!(svg.contains("<svg"));
         assert!(svg.contains("</svg>"));
     }
-
 }
