@@ -26,15 +26,15 @@ Lead (you) ←→ architect ←→ developer ←→ tester ←→ reviewer
 ```javascript
 // ALL agents in ONE message, each knows WHO to message next
 Agent({ prompt: "Research the codebase. SendMessage findings to 'architect'.",
-  subagent_type: "researcher", name: "researcher", run_in_background: true })
+    subagent_type: "researcher", name: "researcher", run_in_background: true })
 Agent({ prompt: "Wait for 'researcher'. Design solution. SendMessage to 'coder'.",
-  subagent_type: "system-architect", name: "architect", run_in_background: true })
+    subagent_type: "system-architect", name: "architect", run_in_background: true })
 Agent({ prompt: "Wait for 'architect'. Implement it. SendMessage to 'tester'.",
-  subagent_type: "coder", name: "coder", run_in_background: true })
+    subagent_type: "coder", name: "coder", run_in_background: true })
 Agent({ prompt: "Wait for 'coder'. Write tests. SendMessage results to 'reviewer'.",
-  subagent_type: "tester", name: "tester", run_in_background: true })
+    subagent_type: "tester", name: "tester", run_in_background: true })
 Agent({ prompt: "Wait for 'tester'. Review code quality and security.",
-  subagent_type: "reviewer", name: "reviewer", run_in_background: true })
+    subagent_type: "reviewer", name: "reviewer", run_in_background: true })
 
 // Kick off the pipeline
 SendMessage({ to: "researcher", summary: "Start", message: "[task context]" })

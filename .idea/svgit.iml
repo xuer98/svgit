@@ -10,6 +10,8 @@
       <sourceFolder url="file://$MODULE_DIR$/pipeline/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/service/examples" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/service/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/bgremove/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/bgremove/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />
