@@ -285,6 +285,14 @@
           <button data-v="on">On</button>
         </div>
       </div>
+      <div class="field curve-only">
+        <label>Smoothness <span class="val" id="curve_error-v"></span><span class="hint">fit px</span></label>
+        <input type="range" id="curve_error" min="0.5" max="8" step="0.5" value="2">
+      </div>
+      <div class="field curve-only">
+        <label>Corner threshold <span class="val" id="curve_corner-v"></span>°</label>
+        <input type="range" id="curve_corner" min="0" max="180" step="5" value="80">
+      </div>
     </div>
 
     <div class="group vtracer-only">
@@ -386,10 +394,10 @@ let debounceTimer = null;
 let inflight = null;      // AbortController for the active request
 
 // ---- sliders with live value labels ----
-const sliders = ['colors','simplify','min_region','filter_speckle','color_precision','layer_difference',
+const sliders = ['colors','simplify','min_region','curve_error','curve_corner','filter_speckle','color_precision','layer_difference',
                  'corner_threshold','length_threshold','splice_threshold','max_iterations','path_precision'];
 // Sliders that belong to the owned pipeline, not a vtracer preset.
-const NON_PRESET_SLIDERS = new Set(['colors','simplify','min_region']);
+const NON_PRESET_SLIDERS = new Set(['colors','simplify','min_region','curve_error','curve_corner']);
 for (const id of sliders) {
   const el = $(id), label = $(id + '-v');
   const sync = () => { label.textContent = el.value; };
@@ -422,9 +430,12 @@ function reflectConditional() {
   const isColor = segValue('color_mode') === 'color';
   const isSpline = segValue('mode') === 'spline';
   const isQuant = segValue('quantize') === 'on';
+  const curveOn = owned && segValue('curve') === 'on';
   // VTracer-specific groups are irrelevant under the owned engine.
   document.querySelectorAll('.vtracer-only').forEach(e => e.classList.toggle('hide', owned));
   document.querySelectorAll('.owned-only').forEach(e => e.classList.toggle('hide', !owned));
+  // Curve-fit knobs only matter when the owned engine is fitting curves.
+  document.querySelectorAll('.curve-only').forEach(e => e.classList.toggle('hide', !curveOn));
   // The owned engine always quantizes, so the Colors slider shows for it too.
   document.querySelectorAll('.quantize-only').forEach(e => e.classList.toggle('hide', !(owned || isQuant)));
   document.querySelectorAll('.color-only').forEach(e => e.classList.toggle('hide', !isColor));
