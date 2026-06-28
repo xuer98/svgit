@@ -380,6 +380,93 @@ pub fn fit_all(seg: &Segmentation, original: &[u8], cfg: &GradientConfig) -> Vec
             (None, None) => None,
         };
     }
+
+    // --- radial-band merge: concentric radial bands → one shared radial ---
+    // The band-merge above is linear-only, so a radial gradient quantized into
+    // rings stays N separate radials with faint seams. Group adjacent radial
+    // roots whose centers coincide, then **re-scan** each group from its common
+    // center to fit one shared radial (deduped to a single <defs> entry).
+    //
+    // The re-scan is essential and the radial sums are NOT reused: r-sums (Σr,
+    // Σr², Σcr) involve a non-translatable sqrt, so summing per-root sums taken
+    // from different centroids would fit a biased model the residual can't catch.
+    // Grouping is pure centroid proximity (concentric bands coincide); the
+    // re-scanned fit then soundly accepts or rejects each group.
+    let is_radial = |rf: &Option<Fill>| matches!(rf, Some(Fill::Radial(_)));
+    let center_tol = (w.min(h) as f64 * 0.05).max(3.0);
+    let redges: Vec<(usize, usize)> = adj
+        .iter()
+        .filter_map(|&(a, b)| {
+            let (ra, rb) = (dsu.find(a as usize), dsu.find(b as usize));
+            let close = (root_cxy[ra].0 - root_cxy[rb].0).hypot(root_cxy[ra].1 - root_cxy[rb].1)
+                <= center_tol;
+            if ra != rb && is_radial(&root_fill[ra]) && is_radial(&root_fill[rb]) && close {
+                Some((ra, rb))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if !redges.is_empty() {
+        // Group radial roots by adjacency + centroid proximity (no fit in the loop).
+        let mut rdsu = Dsu::new(nc);
+        for &(a, b) in &redges {
+            let (ra, rb) = (rdsu.find(a), rdsu.find(b));
+            rdsu.union(ra, rb);
+        }
+        // Per-group combined moments (additive ⇒ exact group centroid) + a pixel
+        // RE-SCAN of radial sums measured from that common center.
+        let mut gmom = vec![Moments::default(); nc];
+        for (c, rf) in root_fill.iter().enumerate() {
+            if is_radial(rf) {
+                let mc = mom[c].clone();
+                gmom[rdsu.find(c)].merge(&mc);
+            }
+        }
+        let mut gcenter = vec![(0f64, 0f64); nc];
+        for (c, gc) in gcenter.iter_mut().enumerate() {
+            if rdsu.find(c) == c {
+                *gc = gmom[c].centroid();
+            }
+        }
+        let mut gacc = vec![RangeAcc::default(); nc];
+        for y in 0..h {
+            for x in 0..w {
+                let p = y * w + x;
+                let cc = seg.labels[p] as usize;
+                if !opaque(cc) || !is_radial(&root_fill[dsu.find(cc)]) {
+                    continue;
+                }
+                let rr = rdsu.find(cc);
+                let (cx, cy) = gcenter[rr];
+                let dist = ((x as f64 - cx).powi(2) + (y as f64 - cy).powi(2)).sqrt();
+                let a = &mut gacc[rr];
+                a.sr += dist;
+                a.srr += dist * dist;
+                a.rmin = a.rmin.min(dist);
+                a.rmax = a.rmax.max(dist);
+                for (ch, scr) in a.scr.iter_mut().enumerate() {
+                    *scr += original[p * 4 + ch] as f64 * dist;
+                }
+            }
+        }
+        // Fit each group from the correctly-centered sums; share it if it holds.
+        let mut shared: Vec<Option<Fill>> = (0..nc).map(|_| None).collect();
+        for (c, sh) in shared.iter_mut().enumerate() {
+            if rdsu.find(c) == c && (gmom[c].n as u32) >= cfg.min_area {
+                *sh = build_radial(&gmom[c], &gacc[c], cfg, gcenter[c]).map(|(f, _)| f);
+            }
+        }
+        let rroot: Vec<usize> = (0..nc).map(|c| rdsu.find(c)).collect();
+        for (c, rf) in root_fill.iter_mut().enumerate() {
+            if matches!(rf, Some(Fill::Radial(_))) {
+                if let Some(f) = &shared[rroot[c]] {
+                    *rf = Some(f.clone());
+                }
+            }
+        }
+    }
+
     for c in 0..nc {
         if !opaque(c) {
             continue;
@@ -701,6 +788,77 @@ mod tests {
             Fill::Linear(_) => panic!("a symmetric cone should be radial, not linear"),
             Fill::Solid(_) => unreachable!(),
         }
+    }
+
+    #[test]
+    fn merges_concentric_radial_bands() {
+        // A radial gradient quantized into an inner disk (comp 0) and an outer
+        // ring (comp 1). Both fit radial on their own; radial-band merging must
+        // hand them ONE shared radial (identical center + radius).
+        let (w, h) = (40usize, 40usize);
+        let (cx, cy) = (19.5f64, 19.5f64);
+        let split = 12.0;
+        let mut labels = vec![0u32; w * h];
+        let mut px = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let r = ((x as f64 - cx).powi(2) + (y as f64 - cy).powi(2)).sqrt();
+                let p = (y * w + x) * 4;
+                let v = (240.0 - 7.0 * r).clamp(0.0, 255.0) as u8;
+                px[p] = v;
+                px[p + 1] = v;
+                px[p + 2] = v;
+                px[p + 3] = 255;
+                labels[y * w + x] = if r < split { 0 } else { 1 };
+            }
+        }
+        let seg = seg_from(labels, w, h, &[1, 2]);
+        let out = fit_all(&seg, &px, &GradientConfig::default());
+        let radial = |f: &Fill| match f {
+            Fill::Radial(g) => (g.cx, g.cy, g.r),
+            _ => panic!("expected radial"),
+        };
+        let g0 = radial(out[0].as_ref().expect("inner radial"));
+        let g1 = radial(out[1].as_ref().expect("outer radial"));
+        assert!(
+            (g0.0 - g1.0).abs() < 1e-9 && (g0.1 - g1.1).abs() < 1e-9 && (g0.2 - g1.2).abs() < 1e-9,
+            "both bands must share one radial: {g0:?} vs {g1:?}"
+        );
+        assert!((g0.0 - cx).abs() < 2.0 && (g0.1 - cy).abs() < 2.0, "center ≈ middle");
+    }
+
+    #[test]
+    fn distinct_radials_do_not_merge() {
+        // Two side-by-side radial cones with DIFFERENT centers must NOT collapse
+        // into one shared radial — the centroid-proximity gate keeps them apart,
+        // and even if grouped the re-scanned fit would reject the union.
+        let (w, h) = (60usize, 30usize);
+        let centers = [(15.0f64, 15.0f64), (45.0f64, 15.0f64)];
+        let mut labels = vec![0u32; w * h];
+        let mut px = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let comp = if x < 30 { 0 } else { 1 };
+                let (cx, cy) = centers[comp];
+                let r = ((x as f64 - cx).powi(2) + (y as f64 - cy).powi(2)).sqrt();
+                let v = (240.0 - 8.0 * r).clamp(0.0, 255.0) as u8;
+                let p = (y * w + x) * 4;
+                px[p] = v;
+                px[p + 1] = v;
+                px[p + 2] = v;
+                px[p + 3] = 255;
+                labels[y * w + x] = comp as u32;
+            }
+        }
+        let seg = seg_from(labels, w, h, &[1, 2]);
+        let out = fit_all(&seg, &px, &GradientConfig::default());
+        let cx = |f: &Fill| match f {
+            Fill::Radial(g) => g.cx,
+            _ => panic!("expected radial"),
+        };
+        let c0 = cx(out[0].as_ref().expect("left radial"));
+        let c1 = cx(out[1].as_ref().expect("right radial"));
+        assert!((c0 - c1).abs() > 20.0, "distinct radials keep distinct centers: {c0} vs {c1}");
     }
 
     #[test]
