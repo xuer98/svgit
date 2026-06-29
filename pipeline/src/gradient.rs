@@ -242,12 +242,20 @@ impl Dsu {
 /// components that share one gradient. Returns one entry per component: `Some`
 /// gradient fill, or `None` to keep the flat color. `original` is RGBA with the
 /// same dimensions as `seg`.
-pub fn fit_all(seg: &Segmentation, original: &[u8], cfg: &GradientConfig) -> Vec<Option<Fill>> {
+pub fn fit_all(
+    seg: &Segmentation,
+    original: &[u8],
+    cfg: &GradientConfig,
+) -> (Vec<Option<Fill>>, Vec<u32>) {
     let nc = seg.num_components;
     let mut out = vec![None; nc];
+    // group_rep[c] = the component that fronts c's gradient group (itself for
+    // solids/singletons). Lets the tracer relabel a merged group to one id and
+    // draw only its outer boundary (no internal band seams).
+    let identity: Vec<u32> = (0..nc as u32).collect();
     let (w, h) = (seg.width, seg.height);
     if nc == 0 || original.len() < w * h * 4 {
-        return out;
+        return (out, identity);
     }
 
     // --- pass 1: per-component moments + 4-neighbour adjacency (opaque only) ---
@@ -407,6 +415,9 @@ pub fn fit_all(seg: &Segmentation, original: &[u8], cfg: &GradientConfig) -> Vec
             }
         })
         .collect();
+    // Maps a linear-root to its radial-merge group root (identity unless a shared
+    // radial is actually assigned), so the geometry-union groups radial bands too.
+    let mut radial_rep: Vec<usize> = (0..nc).collect();
     if !redges.is_empty() {
         // Group radial roots by adjacency + centroid proximity (no fit in the loop).
         let mut rdsu = Dsu::new(nc);
@@ -462,18 +473,26 @@ pub fn fit_all(seg: &Segmentation, original: &[u8], cfg: &GradientConfig) -> Vec
             if matches!(rf, Some(Fill::Radial(_))) {
                 if let Some(f) = &shared[rroot[c]] {
                     *rf = Some(f.clone());
+                    radial_rep[c] = rroot[c]; // only union when a shared radial holds
                 }
             }
         }
     }
 
+    let mut group_rep = identity;
     for c in 0..nc {
         if !opaque(c) {
             continue;
         }
-        out[c] = root_fill[dsu.find(c)].clone();
+        let lr = dsu.find(c);
+        out[c] = root_fill[lr].clone();
+        // Union components that share a gradient: the linear-merge root `lr`, or
+        // its radial-merge group root. Solids (no fill) keep their own id.
+        if root_fill[lr].is_some() {
+            group_rep[c] = radial_rep[lr] as u32;
+        }
     }
-    out
+    (out, group_rep)
 }
 
 fn clamp_color(v: [f64; 3]) -> [u8; 3] {
@@ -687,7 +706,7 @@ mod tests {
     fn fits_a_horizontal_ramp() {
         let (w, h) = (32usize, 16usize);
         let px = ramp_rgba(w, h, false);
-        let out = fit_all(&one_region(w, h), &px, &GradientConfig::default());
+        let (out, _) = fit_all(&one_region(w, h), &px, &GradientConfig::default());
         let g = as_linear(out[0].as_ref().expect("ramp should fit"));
         assert!((g.y1 - g.y2).abs() < 1e-6, "axis horizontal");
         assert!((g.x1 - g.x2).abs() > w as f64 * 0.5, "axis spans width");
@@ -705,7 +724,7 @@ mod tests {
             px[i * 4 + 2] = 40;
             px[i * 4 + 3] = 255;
         }
-        let out = fit_all(&one_region(w, h), &px, &GradientConfig::default());
+        let (out, _) = fit_all(&one_region(w, h), &px, &GradientConfig::default());
         assert!(out[0].is_none(), "flat → solid");
     }
 
@@ -713,7 +732,7 @@ mod tests {
     fn small_region_is_skipped() {
         let (w, h) = (4usize, 4usize);
         let px = ramp_rgba(w, h, false);
-        let out = fit_all(&one_region(w, h), &px, &GradientConfig::default());
+        let (out, _) = fit_all(&one_region(w, h), &px, &GradientConfig::default());
         assert!(out[0].is_none(), "16 px < min_area");
     }
 
@@ -731,7 +750,7 @@ mod tests {
                 px[p + 3] = 255;
             }
         }
-        let out = fit_all(&one_region(w, h), &px, &GradientConfig::default());
+        let (out, _) = fit_all(&one_region(w, h), &px, &GradientConfig::default());
         let g = as_linear(out[0].as_ref().expect("diagonal ramp should fit"));
         let dx = (g.x2 - g.x1).abs();
         let dy = (g.y2 - g.y1).abs();
@@ -752,7 +771,7 @@ mod tests {
         }
         let seg = seg_from(labels, w, h, &[1, 2]);
         let px = ramp_rgba(w, h, false);
-        let out = fit_all(&seg, &px, &GradientConfig::default());
+        let (out, _) = fit_all(&seg, &px, &GradientConfig::default());
         let g0 = as_linear(out[0].as_ref().expect("band 0 gradient"));
         let g1 = as_linear(out[1].as_ref().expect("band 1 gradient"));
         // Same shared gradient: identical endpoints spanning ~full width.
@@ -779,7 +798,7 @@ mod tests {
                 px[p + 3] = 255;
             }
         }
-        let out = fit_all(&one_region(w, h), &px, &GradientConfig::default());
+        let (out, _) = fit_all(&one_region(w, h), &px, &GradientConfig::default());
         match out[0].as_ref().expect("cone should fit a gradient") {
             Fill::Radial(g) => {
                 assert!((g.cx - cx).abs() < 2.0 && (g.cy - cy).abs() < 2.0, "center ≈ middle");
@@ -813,7 +832,7 @@ mod tests {
             }
         }
         let seg = seg_from(labels, w, h, &[1, 2]);
-        let out = fit_all(&seg, &px, &GradientConfig::default());
+        let (out, _) = fit_all(&seg, &px, &GradientConfig::default());
         let radial = |f: &Fill| match f {
             Fill::Radial(g) => (g.cx, g.cy, g.r),
             _ => panic!("expected radial"),
@@ -851,7 +870,7 @@ mod tests {
             }
         }
         let seg = seg_from(labels, w, h, &[1, 2]);
-        let out = fit_all(&seg, &px, &GradientConfig::default());
+        let (out, _) = fit_all(&seg, &px, &GradientConfig::default());
         let cx = |f: &Fill| match f {
             Fill::Radial(g) => g.cx,
             _ => panic!("expected radial"),
@@ -859,6 +878,42 @@ mod tests {
         let c0 = cx(out[0].as_ref().expect("left radial"));
         let c1 = cx(out[1].as_ref().expect("right radial"));
         assert!((c0 - c1).abs() > 20.0, "distinct radials keep distinct centers: {c0} vs {c1}");
+    }
+
+    #[test]
+    fn group_rep_unions_merged_bands_only() {
+        // Merged linear bands share one group rep (the geometry-union target).
+        let (w, h) = (32usize, 16usize);
+        let mut labels = vec![0u32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                labels[y * w + x] = if x < w / 2 { 0 } else { 1 };
+            }
+        }
+        let seg = seg_from(labels, w, h, &[1, 2]);
+        let px = ramp_rgba(w, h, false);
+        let (fills, group) = fit_all(&seg, &px, &GradientConfig::default());
+        assert!(fills[0].is_some() && fills[1].is_some());
+        assert_eq!(group[0], group[1], "merged bands share a group rep");
+
+        // Two unrelated flat regions must NOT be unioned (distinct reps).
+        let mut labels2 = vec![0u32; w * h];
+        let mut px2 = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let p = (y * w + x) * 4;
+                if x < w / 2 {
+                    px2[p] = 230;
+                } else {
+                    px2[p + 2] = 230;
+                }
+                px2[p + 3] = 255;
+                labels2[y * w + x] = if x < w / 2 { 0 } else { 1 };
+            }
+        }
+        let seg2 = seg_from(labels2, w, h, &[1, 2]);
+        let (_f2, group2) = fit_all(&seg2, &px2, &GradientConfig::default());
+        assert_ne!(group2[0], group2[1], "unrelated flats are not unioned");
     }
 
     #[test]
@@ -882,7 +937,7 @@ mod tests {
             }
         }
         let seg = seg_from(labels, w, h, &[1, 2]);
-        let out = fit_all(&seg, &px, &GradientConfig::default());
+        let (out, _) = fit_all(&seg, &px, &GradientConfig::default());
         assert!(out[0].is_none() && out[1].is_none(), "flat step → both stay solid");
     }
 }

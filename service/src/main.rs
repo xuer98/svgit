@@ -203,10 +203,11 @@ async fn convert(mut multipart: Multipart) -> Result<Response, AppError> {
         matches!(p.refine.as_deref(), Some("on") | Some("true") | Some("1")) && engine_owned;
     let refine_snap = p.refine_snap.unwrap_or(2.0).clamp(0.5, 4.0);
     let refine_edge = p.refine_edge.unwrap_or(0.25).clamp(0.05, 0.9) as f32;
-    // Gradient detection is owned-engine only (it refits the owned flat tracer's
-    // regions); the layered/VTracer paths don't use it.
-    let gradient_on =
-        matches!(p.gradient.as_deref(), Some("on") | Some("true") | Some("1")) && engine_owned;
+    // Gradient detection refits the owned tracer's regions against the original
+    // colors. It works for both pipeline engines — the flat owned trace and the
+    // learned per-object layered (segment) trace — but not the VTracer path.
+    let gradient_on = matches!(p.gradient.as_deref(), Some("on") | Some("true") | Some("1"))
+        && (engine_owned || engine_segment);
 
     // Fail fast on a missing model *before* taking a converter slot — otherwise
     // a misconfigured deploy burns the whole pool on a predictable error.
@@ -368,6 +369,9 @@ async fn convert(mut multipart: Multipart) -> Result<Response, AppError> {
                     }
                 }
             }
+            // Gradient fitting refits each object against the original
+            // (pre-quantization) colors, so keep a copy before quantizing.
+            let original = if gradient_on { Some(raw.clone()) } else { None };
             raw = svgit_pipeline::quantize_rgba(
                 raw,
                 &QuantizeConfig {
@@ -380,7 +384,6 @@ async fn convert(mut multipart: Multipart) -> Result<Response, AppError> {
                 cw,
                 ch,
                 &instance_id,
-                instances.len(),
                 &TraceConfig {
                     alpha_threshold: 0,
                     min_area: min_region,
@@ -389,8 +392,9 @@ async fn convert(mut multipart: Multipart) -> Result<Response, AppError> {
                     curve: curve_on,
                     corner_threshold: curve_corner,
                     curve_error: curve_err,
-                    gradient: false,
+                    gradient: gradient_on,
                 },
+                original.as_deref(),
                 refiner.as_ref(),
             ));
         }

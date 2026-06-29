@@ -361,8 +361,8 @@
         <label>Edge gate <span class="val" id="refine_edge-v"></span></label>
         <input type="range" id="refine_edge" min="0.05" max="0.8" step="0.05" value="0.3">
       </div>
-      <div class="field owned-only">
-        <label>Gradients <span class="hint">linear fills</span></label>
+      <div class="field pipeline-only">
+        <label>Gradients <span class="hint">smooth fills</span></label>
         <div class="seg" id="gradient" data-default="off">
           <button data-v="off" class="active">Off</button>
           <button data-v="on">On</button>
@@ -550,6 +550,8 @@ function gatherParams() {
   // Background removal is owned-engine only (deterministic transparent cutout);
   // never leak a stale 'on' to VTracer, whose keying is heuristic.
   const ownedEngine = segValue('engine') === 'owned';
+  // Gradient fitting also runs under the segment engine (per-object fills).
+  const pipelineEngine = ownedEngine || segValue('engine') === 'segment';
   const p = {
     engine: segValue('engine'),
     // Denoise and super-resolution enhance the raster for any engine, so they're
@@ -562,8 +564,8 @@ function gatherParams() {
     quantize: segValue('quantize'),
     curve: segValue('curve'),
     refine: ownedEngine ? segValue('refine') : 'off',
-    // Gradient detection is owned-engine only (refits the owned flat tracer).
-    gradient: ownedEngine ? segValue('gradient') : 'off',
+    // Gradient detection refits the owned/segment trace; never sent to VTracer.
+    gradient: pipelineEngine ? segValue('gradient') : 'off',
     color_mode: segValue('color_mode'),
     hierarchical: segValue('hierarchical'),
     mode: segValue('mode'),

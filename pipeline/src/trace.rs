@@ -119,6 +119,7 @@ fn regions_of(
     skip: Option<usize>,
     refine: Option<&Refiner>,
     fills: Option<&[Option<Fill>]>,
+    group_rep: Option<&[u32]>,
 ) -> Vec<Region> {
     let bboxes = seg.bboxes();
     // Shared junctions, pinned in simplification so adjacent regions tile gaplessly.
@@ -126,6 +127,12 @@ fn regions_of(
     let mut regions: Vec<Region> = Vec::new();
     for c in 0..seg.num_components {
         if seg.component_color[c] == 0 || Some(c) == skip {
+            continue;
+        }
+        // Geometry-union: a component that's been folded into a gradient group
+        // (its rep is another component) has no pixels of its own under the
+        // relabeled map — only the group's representative draws the union.
+        if group_rep.is_some_and(|g| g[c] as usize != c) {
             continue;
         }
         let color = palette[(seg.component_color[c] - 1) as usize];
@@ -172,6 +179,38 @@ fn regions_of(
     regions
 }
 
+/// Optionally fit per-component gradient fills against the original
+/// (pre-quantization) pixels, then apply the geometry-union relabel in place.
+///
+/// When `cfg.gradient` is on and `original` covers the image, [`fit_all`] fits a
+/// gradient per component (merging adjacent quantization bands) and returns a
+/// per-component group representative; we relabel `seg.labels` so each gradient
+/// group traces as ONE union shape (only its outer boundary), and hand the fills
+/// and reps to [`regions_of`]. Returns `(None, None)` when gradients are off or
+/// no usable originals were supplied — the caller then paints flat solids.
+///
+/// Shared by the flat ([`trace_rgba`]) and layered ([`trace_layered`]) tracers;
+/// in the layered case it runs once per object layer, so a smoothly-shaded
+/// object becomes a gradient fill instead of a flat patch.
+fn fit_gradients(
+    seg: &mut Segmentation,
+    cfg: &TraceConfig,
+    original: Option<&[u8]>,
+) -> (Option<Vec<Option<Fill>>>, Option<Vec<u32>>) {
+    if !cfg.gradient {
+        return (None, None);
+    }
+    let n = seg.width * seg.height;
+    let Some(orig) = original.filter(|o| o.len() >= n * 4) else {
+        return (None, None);
+    };
+    let (fills, group_rep) = fit_all(seg, orig, &GradientConfig::default());
+    for lab in seg.labels.iter_mut() {
+        *lab = group_rep[*lab as usize];
+    }
+    (Some(fills), Some(group_rep))
+}
+
 /// Trace an (already quantized) RGBA buffer into a flat-color SVG document.
 /// Pass a [`Refiner`] to snap contours onto a CNN edge map before fitting.
 pub fn trace_rgba(
@@ -193,15 +232,9 @@ pub fn trace_rgba(
     let mut seg = segment(&idx, width, height);
     seg.merge_small(cfg.min_area);
 
-    // Gradient fitting needs the original (pre-quantization) colors. fit_all
-    // merges adjacent bands and returns one optional fill per component.
-    let fills = if cfg.gradient {
-        original
-            .filter(|o| o.len() >= n * 4)
-            .map(|o| fit_all(&seg, o, &GradientConfig::default()))
-    } else {
-        None
-    };
+    // Fit gradients against the original colors (merging bands + relabeling for
+    // the geometry-union) when enabled; `(None, None)` keeps regions flat.
+    let (fills, group_rep) = fit_gradients(&mut seg, cfg, original);
 
     // --- choose a background region (largest opaque) to lay down as a rect ---
     // Skipped in gradient mode: the largest region may itself be a gradient, so
@@ -218,24 +251,38 @@ pub fn trace_rgba(
     }
     let background = bg_region.map(|c| palette[(seg.component_color[c] - 1) as usize]);
 
-    let regions = regions_of(&seg, &palette, cfg, bg_region, refine, fills.as_deref());
+    let regions = regions_of(
+        &seg,
+        &palette,
+        cfg,
+        bg_region,
+        refine,
+        fills.as_deref(),
+        group_rep.as_deref(),
+    );
     to_svg(width, height, background, &regions)
 }
 
 /// Trace an (already quantized) RGBA buffer into a *layered* SVG, one
 /// `<g data-object="…">` group per object. `instance_id` (length `width*height`)
-/// assigns each pixel to a layer: 0 is the background, 1..=`num_instances` are
-/// the objects (e.g. from ML instance masks, resolved to a single id per pixel
-/// by the caller). Each layer is segmented and traced independently, then
-/// color-merged, so an object built from several quantized colors becomes one
-/// group of color paths. Layers are emitted background-first.
+/// assigns each pixel to a layer: 0 is the background, 1.. are the objects (e.g.
+/// from ML instance masks, resolved to a single id per pixel by the caller). The
+/// layer count is taken from the largest id present. Each layer is segmented and
+/// traced independently, then color-merged, so an object built from several
+/// quantized colors becomes one group of color paths. Layers are emitted
+/// background-first.
+///
+/// Pass the `original` (pre-quantization) pixels with `cfg.gradient` set to fit
+/// gradient fills per object — a smoothly-shaded object then becomes one
+/// `<linearGradient>`/`<radialGradient>` fill (deduped across layers in the
+/// shared `<defs>`) instead of a flat patch. `None` keeps every layer flat.
 pub fn trace_layered(
     pixels: &[u8],
     width: usize,
     height: usize,
     instance_id: &[u32],
-    num_instances: usize,
     cfg: &TraceConfig,
+    original: Option<&[u8]>,
     refine: Option<&Refiner>,
 ) -> String {
     let n = width * height;
@@ -245,9 +292,12 @@ pub fn trace_layered(
 
     let (idx, palette) = palette_indices(pixels, n, cfg.alpha_threshold);
 
+    // Layers run 0..=max id present; absent/fully-occluded ids yield empty masks
+    // and are skipped below, so the count is derivable from the map itself.
+    let num_instances = instance_id.iter().copied().max().unwrap_or(0);
     let mut layers: Vec<(String, Vec<Region>)> = Vec::new();
     let mut midx = vec![0u32; n];
-    for layer in 0..=num_instances as u32 {
+    for layer in 0..=num_instances {
         // Mask the palette indices down to just this layer's pixels.
         let mut any = false;
         for p in 0..n {
@@ -263,8 +313,19 @@ pub fn trace_layered(
         }
         let mut seg = segment(&midx, width, height);
         seg.merge_small(cfg.min_area);
-        // Gradients are owned-engine only (v1); the layered tracer stays flat.
-        let regions = regions_of(&seg, &palette, cfg, None, refine, None);
+        // Per-layer gradient fitting: each object's region(s) refit against the
+        // original colors (geometry-union applies within the layer). Gradients
+        // never cross object boundaries — fitting is scoped to this layer's mask.
+        let (fills, group_rep) = fit_gradients(&mut seg, cfg, original);
+        let regions = regions_of(
+            &seg,
+            &palette,
+            cfg,
+            None,
+            refine,
+            fills.as_deref(),
+            group_rep.as_deref(),
+        );
         if regions.is_empty() {
             continue;
         }
@@ -387,7 +448,7 @@ mod tests {
         let px = rgba(&[r, r, b, g]);
         let inst = vec![0u32, 0, 1, 2];
         let cfg = TraceConfig { min_area: 0, simplify: 0.0, ..Default::default() };
-        let svg = trace_layered(&px, 4, 1, &inst, 2, &cfg, None);
+        let svg = trace_layered(&px, 4, 1, &inst, &cfg, None, None);
 
         assert!(svg.starts_with("<?xml"));
         assert!(svg.ends_with("</svg>\n"));
@@ -405,8 +466,52 @@ mod tests {
 
     #[test]
     fn layered_empty_is_valid_svg() {
-        let svg = trace_layered(&[], 0, 0, &[], 0, &TraceConfig::default(), None);
+        let svg = trace_layered(&[], 0, 0, &[], &TraceConfig::default(), None, None);
         assert!(svg.contains("<svg"));
         assert!(svg.contains("</svg>"));
+    }
+
+    #[test]
+    fn layered_object_emits_gradient() {
+        // 16×16: the top half (rows 0..8) is one object that quantized to a flat
+        // red but whose ORIGINAL pixels ramp red 0→255 across x; the bottom half
+        // is a flat-blue background layer. With gradients on, the object becomes a
+        // <linearGradient> fill inside its own group while the background — a
+        // separate layer — stays a flat solid (gradients don't cross objects).
+        let (w, h) = (16usize, 16usize);
+        let mut quant = vec![0u8; w * h * 4];
+        let mut orig = vec![0u8; w * h * 4];
+        let mut inst = vec![0u32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let p = (y * w + x) * 4;
+                if y < 8 {
+                    inst[y * w + x] = 1; // object layer
+                    quant[p] = 128; // flat red after quantization
+                    quant[p + 3] = 255;
+                    orig[p] = ((x * 255) / (w - 1)) as u8; // red ramp in the original
+                    orig[p + 3] = 255;
+                } else {
+                    quant[p + 2] = 200; // flat blue background
+                    quant[p + 3] = 255;
+                    orig[p + 2] = 200;
+                    orig[p + 3] = 255;
+                }
+            }
+        }
+        let cfg = TraceConfig { min_area: 0, simplify: 0.0, gradient: true, ..Default::default() };
+        let svg = trace_layered(&quant, w, h, &inst, &cfg, Some(&orig), None);
+        assert!(svg.contains("<defs>"), "defs block present");
+        assert!(svg.contains("<linearGradient"), "the object fit a gradient");
+        assert!(svg.contains("fill=\"url(#g0)\""), "the object path references the gradient");
+        assert!(svg.contains("data-object=\"object-1\""));
+        assert!(svg.contains("data-object=\"background\""));
+        assert!(svg.contains("#0000c8"), "the background layer stays flat blue");
+
+        // With gradients off the object is a flat fill again — no gradient def.
+        let cfg_flat = TraceConfig { min_area: 0, simplify: 0.0, gradient: false, ..Default::default() };
+        let flat = trace_layered(&quant, w, h, &inst, &cfg_flat, Some(&orig), None);
+        assert!(!flat.contains("linearGradient"), "no gradient when disabled");
+        assert!(flat.contains("#800000"), "flat red object instead");
     }
 }
